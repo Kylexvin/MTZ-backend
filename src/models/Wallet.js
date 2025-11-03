@@ -121,16 +121,18 @@ walletSchema.statics.transferTokensWithFees = async function(
   }
 
   const Transaction = mongoose.model('Transaction');
+  
+  // FIX: Convert user IDs to ObjectIds
   const transactionRecord = await Transaction.createTokenTransfer({
-    fromUser: fromUserId,
-    toUser: toUserId,
+    fromUser: new mongoose.Types.ObjectId(fromUserId),
+    toUser: new mongoose.Types.ObjectId(toUserId),
     tokensAmount: amount,
     fees: {
       amount: feeAmount,
       rate: feeAmount / amount
     },
     notes: description
-  });
+  }, session);
 
   return {
     success: true,
@@ -162,11 +164,11 @@ walletSchema.statics.transferTokens = async function(fromUserId, toUserId, amoun
 
     const Transaction = mongoose.model('Transaction');
     await Transaction.createTokenTransfer({
-      fromUser: fromUserId,
-      toUser: toUserId,
+      fromUser: new mongoose.Types.ObjectId(fromUserId),
+      toUser: new mongoose.Types.ObjectId(toUserId),
       tokensAmount: amount,
       notes: description
-    });
+    }, session);
 
     await session.commitTransaction();
 
@@ -211,11 +213,11 @@ walletSchema.statics.bulkTransfer = async function(fromUserId, transfers, descri
       await toWallet.addTokens(transfer.amount, session);
 
       await mongoose.model('Transaction').createTokenTransfer({
-        fromUser: fromUserId,
-        toUser: transfer.toUserId,
+        fromUser: new mongoose.Types.ObjectId(fromUserId),
+        toUser: new mongoose.Types.ObjectId(transfer.toUserId),
         tokensAmount: transfer.amount,
         notes: transfer.description || description
-      });
+      }, session);
     }
 
     await session.commitTransaction();

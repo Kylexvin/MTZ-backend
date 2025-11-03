@@ -30,7 +30,11 @@ class App {
   setupMiddleware() {
     // Security & CORS
     this.app.use(cors({
-      origin: Environment.get('CORS_ORIGIN', 'http://localhost:3000'),
+      origin: [
+        'http://localhost:3000',
+        'http://localhost:8081',
+        'exp://192.168.100.6:8081'
+      ],
       credentials: true
     }));
 

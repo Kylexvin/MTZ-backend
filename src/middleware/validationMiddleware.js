@@ -104,7 +104,38 @@ static validatePublicPayment(req, res, next) {
 
   next();
 }
+/**
+ * Validate phone login data
+ */
+static validatePhoneLogin(req, res, next) {
+  const { phone, password } = req.body;
 
+  if (!phone || !password) {
+    return res.status(400).json({
+      success: false,
+      message: 'Phone number and password are required'
+    });
+  }
+
+  // Validate phone (Kenyan format)
+  const phoneRegex = /^254[17]\d{8}$/;
+  if (!phoneRegex.test(phone)) {
+    return res.status(400).json({
+      success: false,
+      message: 'Invalid phone number format. Use 254XXXXXXXXX'
+    });
+  }
+
+  // Validate password
+  if (password.length < 6) {
+    return res.status(400).json({
+      success: false,
+      message: 'Password must be at least 6 characters'
+    });
+  }
+
+  next();
+}
 static validatePhone(req, res, next) {
   const { phone } = req.body;
 

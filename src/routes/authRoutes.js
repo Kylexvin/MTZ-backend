@@ -21,7 +21,10 @@ router.post('/login',
   ValidationMiddleware.validateLogin, 
   AuthController.login
 );
-
+router.post('/login-phone', 
+  ValidationMiddleware.validatePhoneLogin, // Add this validation
+  AuthController.loginWithPhone
+);
 // ✅ ADD PUBLIC PAYMENT ROUTES (No token required)
 router.post('/verify-payment-public', 
   ValidationMiddleware.validatePublicPayment,

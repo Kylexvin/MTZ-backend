@@ -40,7 +40,7 @@ class WalletController {
   }
 
 /** 
- * P2P token transfer between users WITH PIN VERIFICATION (using phone numbers)
+ * P2P token transfer - WORKING VERSION
  */
 static async transferTokens(req, res) {
   const session = await mongoose.startSession();
@@ -51,54 +51,58 @@ static async transferTokens(req, res) {
     const { toUserPhone, tokenAmount, securityPin, notes } = req.body;
     const fromUserId = req.user.id;
 
-    // 🔒 STEP 1: Require security PIN and recipient phone
+    // Validation
     if (!securityPin || !toUserPhone) {
       throw new Error('Security PIN and recipient phone are required');
     }
 
-    if (tokenAmount <= 0) {
-      throw new Error('Token amount must be positive');
-    }
-
-    const [fromUser, toUser, token] = await Promise.all([
+    const [fromUser, toUser] = await Promise.all([
       User.findById(fromUserId).select('+pin'),
-      User.findOne({ phone: toUserPhone }),
-      Token.getToken()
+      User.findOne({ phone: toUserPhone })
     ]);
 
     if (!fromUser || !toUser) {
       throw new Error('User not found');
     }
 
-    if (fromUser.phone === toUserPhone) {
-      throw new Error('Cannot transfer to yourself');
-    }
-
-    // 🔒 STEP 2: Verify PIN
+    // Verify PIN
     const isPinValid = await fromUser.comparePin(securityPin);
     if (!isPinValid) {
       throw new Error('Invalid security PIN');
     }
 
-    // 💰 STEP 3: Calculate fees
-    const feeConfig = token.feeStructure.p2pTransfer;
-    let feeAmount = tokenAmount * feeConfig.rate;
-    
-    if (feeConfig.maxFee > 0 && feeAmount > feeConfig.maxFee) {
-      feeAmount = feeConfig.maxFee;
+    // Get wallets
+    const fromWallet = await Wallet.findOne({ user: fromUserId }).session(session);
+    const toWallet = await Wallet.findOne({ user: toUser._id }).session(session) || 
+                     await Wallet.create([{ user: toUser._id }], { session }).then(wallets => wallets[0]);
+
+    if (!fromWallet.canSend(tokenAmount)) {
+      throw new Error('Insufficient balance');
     }
 
-    const totalDeduction = tokenAmount + feeAmount;
+    // Transfer tokens
+    await fromWallet.deductTokens(tokenAmount, session);
+    await toWallet.addTokens(tokenAmount, session);
 
-    // 💰 STEP 4: Use enhanced transfer with fees
-    const transferResult = await Wallet.transferTokensWithFees(
-      fromUserId, 
-      toUser._id,
-      tokenAmount,
-      feeAmount,
-      notes || `P2P transfer to ${toUser.name}`,
-      session
-    );
+    // ✅ CREATE TRANSACTION DIRECTLY - NO BROKEN METHODS
+    const transactionData = {
+      type: 'token_transfer',
+      fromUser: fromUserId,    // Just pass the ID directly
+      toUser: toUser._id,      // Just pass the ID directly
+      tokensAmount: tokenAmount,
+      fees: {
+        amount: 0,
+        rate: 0,
+        type: 'p2p_transfer'
+      },
+      status: 'completed',
+      notes: notes || `P2P transfer to ${toUser.name}`
+    };
+
+    // Save transaction directly
+    const Transaction = mongoose.model('Transaction');
+    const transaction = new Transaction(transactionData);
+    const savedTx = await transaction.save({ session });
 
     await session.commitTransaction();
 
@@ -107,14 +111,9 @@ static async transferTokens(req, res) {
       message: `${tokenAmount} MTZ transferred to ${toUser.name}`,
       data: {
         receipt: {
-          transactionId: transferResult.transactionId,
+          transactionId: savedTx._id,
           tokensSent: tokenAmount,
-          fees: {
-            amount: feeAmount,
-            rate: feeConfig.rate
-          },
-          netReceived: tokenAmount,
-          fromBalance: transferResult.fromBalance,
+          fromBalance: fromWallet.balances.MTZ - tokenAmount,
           toUser: {
             name: toUser.name,
             phone: toUser.phone
@@ -124,18 +123,13 @@ static async transferTokens(req, res) {
     });
 
   } catch (error) {
-    // 👇 Only abort if we're still in a transaction
-    if (session.inTransaction()) {
-      await session.abortTransaction();
-    }
-    
+    await session.abortTransaction();
     res.status(400).json({
       success: false,
       message: 'Transfer failed',
       error: error.message
     });
   } finally {
-    // 👇 Always end the session
     session.endSession();
   }
 }

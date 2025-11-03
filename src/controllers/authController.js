@@ -170,67 +170,146 @@ static async registerKccAdmin(req, res) {
     });
   }
 }
-  /**
-   * User login 
-   */
-  static async login(req, res) {
-    try {
-      const { email, password } = req.body;
-      
-      const user = await User.findOne({ email }).select('+password');
-      if (!user) {
-        return res.status(401).json({
-          success: false,
-          message: 'Invalid email or password'
-        });
-      }
-      
-      const isPasswordValid = await user.comparePassword(password);
-      if (!isPasswordValid) {
-        return res.status(401).json({
-          success: false,
-          message: 'Invalid email or password'
-        });
-      }
-      
-      if (user.status !== 'active') {
-        return res.status(401).json({
-          success: false,
-          message: user.paymentStatus === 'pending' 
-            ? 'Account pending payment verification' 
-            : 'Account suspended'
-        });
-      }
-      
-      const token = user.generateAuthToken();
-      
-      const userResponse = {
-        id: user._id,
-        name: user.name,
-        phone: user.phone,
-        email: user.email,
-        role: user.role,
-        status: user.status,
-        tokenBalance: user.tokenBalance,
-        county: user.county,
-        assignedDepot: user.assignedDepot
-      };
-      
-      res.json({
-        success: true,
-        message: `Welcome back, ${user.name}!`,
-        data: { user: userResponse, token }
-      });
-      
-    } catch (error) {
-      res.status(500).json({
+/**
+ * User login 
+ */
+static async login(req, res) {
+  try {
+    const { email, password } = req.body;
+    
+    const user = await User.findOne({ email }).select('+password');
+    if (!user) {
+      return res.status(401).json({
         success: false,
-        message: 'Login failed',
-        error: error.message
+        message: 'Invalid email or password'
       });
     }
+    
+    const isPasswordValid = await user.comparePassword(password);
+    if (!isPasswordValid) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid email or password'
+      });
+    }
+    
+    // Return user data even if pending, but with different status
+    const userResponse = {
+      id: user._id,
+      name: user.name,
+      phone: user.phone,
+      email: user.email,
+      role: user.role,
+      status: user.status,
+      tokenBalance: user.tokenBalance,
+      county: user.county,
+      assignedDepot: user.assignedDepot,
+      onboardingFee: user.onboardingFee,
+      paymentStatus: user.paymentStatus
+    };
+    
+    if (user.status !== 'active') {
+      return res.status(200).json({  // Return 200 but indicate pending status
+        success: true,
+        message: user.paymentStatus === 'pending' 
+          ? 'Account pending payment verification' 
+          : 'Account suspended',
+        data: { 
+          user: userResponse, 
+          token: null, // No token for pending users
+          requiresPayment: user.paymentStatus === 'pending'
+        }
+      });
+    }
+    
+    const token = user.generateAuthToken();
+    
+    res.json({
+      success: true,
+      message: `Welcome back, ${user.name}!`,
+      data: { user: userResponse, token }
+    });
+    
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Login failed',
+      error: error.message
+    });
   }
+}
 
+/**
+ * User login with phone number
+ */
+static async loginWithPhone(req, res) {
+  try {
+    const { phone, password } = req.body;
+    
+    // Format phone number to ensure consistency
+    const formattedPhone = phone.startsWith('254') ? phone : `254${phone.replace(/^0/, '')}`;
+    
+    const user = await User.findOne({ phone: formattedPhone }).select('+password');
+    if (!user) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid phone number or password'
+      });
+    }
+    
+    const isPasswordValid = await user.comparePassword(password);
+    if (!isPasswordValid) {
+      return res.status(401).json({
+        success: false,
+        message: 'Invalid phone number or password'
+      });
+    }
+    
+    // Return user data even if pending, but with different status
+    const userResponse = {
+      id: user._id,
+      name: user.name,
+      phone: user.phone,
+      email: user.email,
+      role: user.role,
+      status: user.status,
+      tokenBalance: user.tokenBalance,
+      county: user.county,
+      assignedDepot: user.assignedDepot,
+      onboardingFee: user.onboardingFee,
+      paymentStatus: user.paymentStatus
+    };
+    
+    if (user.status !== 'active') {
+      return res.status(200).json({  // Return 200 but indicate pending status
+        success: true,
+        message: user.paymentStatus === 'pending' 
+          ? 'Account pending payment verification' 
+          : 'Account suspended',
+        data: { 
+          user: userResponse, 
+          token: null, // No token for pending users
+          requiresPayment: user.paymentStatus === 'pending'
+        }
+      });
+    }
+    
+    const token = user.generateAuthToken();
+    
+    res.json({
+      success: true,
+      message: `Welcome back, ${user.name}!`,
+      data: { user: userResponse, token }
+    });
+    
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Login failed',
+      error: error.message
+    });
+  }
+}
   /**
    * Verify PIN
    */

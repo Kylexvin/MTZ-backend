@@ -18,10 +18,11 @@ router.get('/deposits/:depositId', FarmerController.getDepositDetails);
 // 🥛 MILK WITHDRAWAL ROUTES  ✅ ADD THIS SECTION
 // ========================
 router.post('/withdraw-milk', FarmerController.withdrawMilk);
-
+// In your farmer routes file, add this temporary route:
+router.get('/debug-transactions', FarmerController.debugTransactions);
 // ========================
 // 📊 DASHBOARD ROUTES
 // ========================
-router.get('/dashboard', FarmerController.getDepositSummary);
+router.get('/dashboard', FarmerController.getDashboard);
 
 export default router;

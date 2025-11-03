@@ -361,6 +361,145 @@ static async withdrawMilk(req, res) {
     }
   }
 
+/**
+ * Get farmer dashboard data with stats and recent activity
+ */
+static async getDashboard(req, res) {
+  try {
+    const farmerId = req.user.id;
+    
+    // Get ALL transactions for this farmer (including those with missing user fields)
+    const recentActivity = await Transaction.find({
+      $or: [
+        { fromUser: farmerId },
+        { toUser: farmerId },
+        // Also include token_transfer transactions that might have issues
+        { 
+          type: 'token_transfer',
+          $or: [
+            { fromUser: { $exists: false } },
+            { toUser: { $exists: false } }
+          ]
+        }
+      ]
+    })
+    .sort({ createdAt: -1 })
+    .limit(10)
+    .populate('fromUser', 'name phone')
+    .populate('toUser', 'name phone')
+    .populate('depot', 'name code')
+    .lean();
+
+    // Format activity - handle missing user data gracefully
+    const formattedActivity = recentActivity.map(activity => {
+      let type, description, unit, amount;
+      
+      if (activity.type === 'milk_deposit') {
+        type = 'deposit';
+        description = `Milk Deposit at ${activity.depot?.name || 'Depot'}`;
+        unit = 'L';
+        amount = activity.litersRaw;
+      } else if (activity.type === 'milk_withdrawal') {
+        type = 'withdrawal';
+        description = `Milk Withdrawal from ${activity.depot?.name || 'Depot'}`;
+        unit = 'L';
+        amount = activity.litersPasteurized;
+      } else if (activity.type === 'token_transfer') {
+        // Handle P2P transactions - even with missing user data
+        const isSender = activity.fromUser && activity.fromUser._id?.toString() === farmerId.toString();
+        const isReceiver = activity.toUser && activity.toUser._id?.toString() === farmerId.toString();
+        
+        if (isSender) {
+          type = 'sent';
+          description = `Token Transfer to ${activity.toUser?.name || 'User'}`;
+        } else if (isReceiver) {
+          type = 'received'; 
+          description = `Token Transfer from ${activity.fromUser?.name || 'User'}`;
+        } else {
+          // Fallback for transactions with missing user data
+          type = 'transfer';
+          description = `Token Transfer`;
+        }
+        
+        unit = 'MTZ';
+        amount = activity.tokensAmount;
+      }
+
+      return {
+        id: activity._id.toString(),
+        type: type,
+        amount: amount || 0,
+        unit: unit,
+        description: description,
+        timestamp: activity.createdAt,
+        status: activity.status
+      };
+    });
+
+    // Get stats
+    const today = new Date();
+    const startOfToday = new Date(today.setHours(0, 0, 0, 0));
+    const startOfWeek = new Date(today.setDate(today.getDate() - today.getDay()));
+
+    const todayDeposits = await Transaction.aggregate([
+      {
+        $match: {
+          fromUser: new mongoose.Types.ObjectId(farmerId),
+          type: 'milk_deposit',
+          status: 'completed',
+          createdAt: { $gte: startOfToday }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          totalLiters: { $sum: '$litersRaw' }
+        }
+      }
+    ]);
+
+    const weekDeposits = await Transaction.aggregate([
+      {
+        $match: {
+          fromUser: new mongoose.Types.ObjectId(farmerId),
+          type: 'milk_deposit', 
+          status: 'completed',
+          createdAt: { $gte: startOfWeek }
+        }
+      },
+      {
+        $group: {
+          _id: null,
+          totalLiters: { $sum: '$litersRaw' }
+        }
+      }
+    ]);
+
+    const todayLiters = todayDeposits[0]?.totalLiters || 0;
+    const weekLiters = weekDeposits[0]?.totalLiters || 0;
+
+    res.json({
+      success: true,
+      message: 'Dashboard data retrieved successfully',
+      data: {
+        stats: {
+          today: todayLiters,
+          week: weekLiters,
+          additional: "100%"
+        },
+        recentActivity: formattedActivity
+      }
+    });
+
+  } catch (error) {
+    console.error('Dashboard error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to load dashboard data',
+      error: error.message
+    });
+  }
+}
   /**
    * Get specific deposit details by ID/code
    */
@@ -451,7 +590,40 @@ static async withdrawMilk(req, res) {
       });
     }
   }
+// Add this method to your FarmerController class
+static async debugTransactions(req, res) {
+  try {
+    const transactions = await Transaction.find({
+      type: 'token_transfer',
+      $or: [
+        { fromUser: { $exists: false } },
+        { toUser: { $exists: false } },
+        { fromUser: null },
+        { toUser: null }
+      ]
+    }).limit(10);
 
+    const results = transactions.map(tx => ({
+      id: tx._id,
+      fromUser: tx.fromUser,
+      toUser: tx.toUser,
+      fromUserType: typeof tx.fromUser,
+      toUserType: typeof tx.toUser,
+      tokensAmount: tx.tokensAmount,
+      notes: tx.notes
+    }));
+
+    res.json({
+      success: true,
+      transactions: results
+    });
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+}
   /**
    * Helper function to determine next steps
    */
@@ -477,7 +649,7 @@ static async withdrawMilk(req, res) {
     };
     return descriptions[status] || status;
   }
-
+ 
   /**
    * Helper function to get lactometer descriptions
    */

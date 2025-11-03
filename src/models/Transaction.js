@@ -18,14 +18,14 @@ const transactionSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: function() {
-      return this.type !== 'token_transfer';
+      return ['milk_deposit', 'milk_withdrawal', 'kcc_pickup', 'kcc_delivery'].includes(this.type);
     }
   },
   depot: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Depot',
     required: function() {
-      return this.type !== 'token_transfer';
+      return ['milk_deposit', 'milk_withdrawal', 'kcc_pickup', 'kcc_delivery'].includes(this.type);
     }
   },
   kccAttendant: {
@@ -59,8 +59,8 @@ const transactionSchema = new mongoose.Schema({
     },
     type: {
       type: String,
-      enum: ['p2p_transfer', 'cash_redemption', 'withdrawal'],
-      default: 'p2p_transfer'
+      enum: ['p2p_transfer', 'cash_redemption', 'withdrawal', 'none'],
+      default: 'none'
     }
   },
   exchangeRate: Number,
@@ -109,9 +109,26 @@ transactionSchema.index({ 'fees.amount': 1 });
 
 transactionSchema.pre('save', async function(next) {
   if (!this.reference) {
-    const count = await this.constructor.countDocuments();
-    this.reference = `TX${String(count + 1).padStart(6, '0')}`;
+    try {
+      const count = await this.constructor.countDocuments();
+      this.reference = `TX${String(count + 1).padStart(6, '0')}`;
+    } catch (error) {
+      // Fallback if count fails
+      this.reference = `TX${Date.now()}`;
+    }
   }
+  
+  // FIX: Set correct fee types based on transaction type
+  if (this.type === 'token_transfer' && this.fees.amount > 0) {
+    this.fees.type = 'p2p_transfer';
+  } else if (this.type === 'milk_withdrawal' && this.fees.amount > 0) {
+    this.fees.type = 'withdrawal';
+  } else if (this.type === 'cash_eposit' && this.fees.amount > 0) {
+    this.fees.type = 'cash_redemption';
+  } else {
+    this.fees.type = 'none';
+  }
+  
   next();
 });
 
@@ -197,7 +214,7 @@ transactionSchema.statics.getStats = async function(depotId = null, days = 30) {
   ]);
 };
 
-transactionSchema.statics.createMilkDeposit = async function(depositData) {
+transactionSchema.statics.createMilkDeposit = async function(depositData, session = null) {
   const {
     farmerId,
     attendantId,
@@ -212,10 +229,10 @@ transactionSchema.statics.createMilkDeposit = async function(depositData) {
 
   const transaction = new this({
     type: 'milk_deposit',
-    fromUser: farmerId,
-    toUser: farmerId,
-    attendant: attendantId,
-    depot: depotId,
+    fromUser: new mongoose.Types.ObjectId(farmerId),
+    toUser: new mongoose.Types.ObjectId(farmerId),
+    attendant: new mongoose.Types.ObjectId(attendantId),
+    depot: new mongoose.Types.ObjectId(depotId),
     litersRaw: liters,
     tokensAmount: tokensAmount,
     exchangeRate: exchangeRate,
@@ -223,13 +240,17 @@ transactionSchema.statics.createMilkDeposit = async function(depositData) {
     qualityGrade: lactometerReading >= 28 ? 'premium' : 'standard',
     depositCode: depositCode,
     shortCode: shortCode,
-    status: 'completed'
+    status: 'completed',
+    fees: { amount: 0, rate: 0, type: 'none' }
   });
 
+  if (session) {
+    return transaction.save({ session });
+  }
   return transaction.save();
 };
 
-transactionSchema.statics.createTokenTransfer = async function(transferData) {
+transactionSchema.statics.createTokenTransfer = async function(transferData, session = null) {
   const {
     fromUserId,
     toUserId,
@@ -238,20 +259,29 @@ transactionSchema.statics.createTokenTransfer = async function(transferData) {
     notes
   } = transferData;
 
-  const transaction = new this({
+  const transactionData = {
     type: 'token_transfer',
-    fromUser: fromUserId,
-    toUser: toUserId,
+    fromUser: new mongoose.Types.ObjectId(fromUserId),
+    toUser: new mongoose.Types.ObjectId(toUserId),
     tokensAmount: tokensAmount,
-    fees: fees,
+    fees: {
+      amount: fees.amount || 0,
+      rate: fees.rate || 0,
+      type: 'p2p_transfer'
+    },
     status: 'completed',
     notes: notes
-  });
+  };
 
+  const transaction = new this(transactionData);
+  
+  if (session) {
+    return transaction.save({ session });
+  }
   return transaction.save();
 };
 
-transactionSchema.statics.createKccPickup = async function(pickupData) {
+transactionSchema.statics.createKccPickup = async function(pickupData, session = null) {
   const {
     depotId,
     attendantId,
@@ -263,17 +293,21 @@ transactionSchema.statics.createKccPickup = async function(pickupData) {
 
   const transaction = new this({
     type: 'kcc_pickup',
-    fromUser: attendantId,
-    toUser: kccAttendantId,
-    attendant: attendantId,
-    kccAttendant: kccAttendantId,
-    depot: depotId,
+    fromUser: new mongoose.Types.ObjectId(attendantId),
+    toUser: new mongoose.Types.ObjectId(kccAttendantId),
+    attendant: new mongoose.Types.ObjectId(attendantId),
+    kccAttendant: new mongoose.Types.ObjectId(kccAttendantId),
+    depot: new mongoose.Types.ObjectId(depotId),
     litersRaw: litersRaw,
     tokensAmount: tokensReplenished,
     settlementBatch: settlementBatch,
-    status: 'completed'
+    status: 'completed',
+    fees: { amount: 0, rate: 0, type: 'none' }
   });
 
+  if (session) {
+    return transaction.save({ session });
+  }
   return transaction.save();
 };
 
