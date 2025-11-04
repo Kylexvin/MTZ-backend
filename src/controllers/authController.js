@@ -311,7 +311,7 @@ static async loginWithPhone(req, res) {
   }
 }
   /**
-   * Verify PIN
+   * Verify PIN  
    */
   static async verifyPin(req, res) {
     try {
