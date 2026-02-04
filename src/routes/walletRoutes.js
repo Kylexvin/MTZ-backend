@@ -13,6 +13,7 @@ router.get('/balance', WalletController.getWalletBalance);
 router.get('/transactions', WalletController.getTransactionHistory);
 router.post('/transfer', WalletController.transferTokens);
 router.post('/calculate', WalletController.calculateValue);
+router.post('/redeem', WalletController.cashRedemption);
 
 // Admin-only route
 router.post('/transfer-float', AuthMiddleware.authorize('admin'), WalletController.transferFloat);

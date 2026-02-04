@@ -1,4 +1,3 @@
-// server.js
 import Environment from './src/config/env.js';
 
 /**

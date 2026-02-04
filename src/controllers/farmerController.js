@@ -133,6 +133,74 @@ class FarmerController {
       });
     }
   }
+
+  
+  /**
+ * Check depot by code (for withdrawal verification)
+ */
+static async checkDepot(req, res) {
+  try {
+    const { code } = req.params;
+    
+    if (!code) {
+      return res.status(400).json({
+        success: false,
+        message: 'Depot code is required'
+      });
+    }
+
+    const depot = await Depot.findOne({ code: code.toUpperCase() })
+      .select('name code location stock status assignedAttendant')
+      .populate('assignedAttendant', 'name phone role');
+
+    if (!depot) {
+      return res.status(404).json({
+        success: false,
+        message: 'Depot not found'
+      });
+    }
+
+    // Format response
+    const depotInfo = {
+      name: depot.name,
+      code: depot.code,
+      location: {
+        county: depot.location.county,
+        subcounty: depot.location.subcounty,
+        village: depot.location.village,
+        fullAddress: `${depot.location.village}, ${depot.location.subcounty}, ${depot.location.county}`
+      },
+      stock: {
+        rawMilk: depot.stock.rawMilk,
+        pasteurizedMilk: depot.stock.pasteurizedMilk,
+        capacity: depot.stock.capacity,
+        rawPercent: Math.round((depot.stock.rawMilk / depot.stock.capacity) * 100),
+        pasteurizedPercent: Math.round((depot.stock.pasteurizedMilk / depot.stock.capacity) * 100)
+      },
+      status: depot.status,
+      attendant: depot.assignedAttendant ? {
+        name: depot.assignedAttendant.name,
+        phone: depot.assignedAttendant.phone,
+        role: depot.assignedAttendant.role
+      } : null,
+      canWithdraw: depot.canProcessWithdrawal(1) // Check if can process at least 1L
+    };
+
+    res.json({
+      success: true,
+      message: 'Depot found',
+      data: depotInfo
+    });
+
+  } catch (error) {
+    console.error('Depot check error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to check depot',
+      error: error.message
+    });
+  }
+}
 /**
  * Enhanced Farmer Milk Withdrawal - Depot Codes & Verification
  */
@@ -265,6 +333,8 @@ static async withdrawMilk(req, res) {
     });
   }
 }
+
+
   /**
    * Get farmer's deposit summary for dashboard
    */

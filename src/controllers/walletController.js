@@ -40,7 +40,7 @@ class WalletController {
   }
 
 /** 
- * P2P token transfer - WORKING VERSION
+ * P2P token transfer 
  */
 static async transferTokens(req, res) {
   const session = await mongoose.startSession();
@@ -134,86 +134,124 @@ static async transferTokens(req, res) {
   }
 }
 
-  /**
-   * Cash redemption - Burn tokens and send M-Pesa
-   */
-  static async cashRedemption(req, res) {
-    try {
-      const { tokenAmount } = req.body;
-      const userId = req.user.id;
+/**
+ * Cash redemption - Transfer tokens to admin (MVP simulation)
+ * Same pattern as P2P transfer but to admin account
+ */
+static async cashRedemption(req, res) {
+  const session = await mongoose.startSession();
+  
+  try {
+    session.startTransaction();
+    
+    const { tokenAmount, securityPin } = req.body;
+    const fromUserId = req.user.id;
 
-      const [user, wallet, token] = await Promise.all([
-        User.findById(userId),
-        Wallet.getOrCreateWallet(userId),
-        Token.getToken()
-      ]);
-
-      // ✅ Check wallet balance instead of user.tokenBalance
-      if (wallet.getBalance() < tokenAmount) {
-        return res.status(400).json({
-          success: false,
-          message: `Insufficient tokens. Available: ${wallet.getBalance()}, Requested: ${tokenAmount}`
-        });
-      }
-
-      // Verify minimum redemption
-      if (tokenAmount < token.redemptionRules.minRedemption) {
-        return res.status(400).json({
-          success: false,
-          message: `Minimum redemption is ${token.redemptionRules.minRedemption} MTZ`
-        });
-      }
-
-      // Calculate redemption value
-      const redemption = Token.calculateRedemptionValue(tokenAmount);
-
-      // Create redemption transaction
-      const redemptionTx = new Transaction({
-        type: 'cash_redemption',
-        fromUser: userId,
-        toUser: userId,
-        attendant: userId, // Self-service
-        depot: user.assignedDepot || null,
-        tokensAmount: tokenAmount,
-        cashAmount: redemption.netValue,
-        status: 'pending' // Wait for M-Pesa confirmation
-      });
-
-      await redemptionTx.save();
-
-      // ✅ Use wallet.deductTokens instead of user.updateTokenBalance
-      await wallet.deductTokens(tokenAmount);
-      
-      // Burn tokens
-      await Token.burnTokens(tokenAmount, 'cash_redemption');
-
-      // TODO: Integrate with M-Pesa API
-
-      res.json({
-        success: true,
-        message: `Redemption processed - ${redemption.netValue} KSH sent via M-Pesa`,
-        data: {
-          receipt: {
-            transactionId: redemptionTx.reference,
-            tokensRedeemed: tokenAmount,
-            redemptionValue: redemption.netValue,
-            fee: redemption.fee,
-            feeValue: redemption.fee * token.universalPrice.value,
-            newBalance: wallet.getBalance(),
-            mpesaStatus: 'processing'
-          }
-        }
-      });
-
-    } catch (error) {
-      res.status(400).json({
-        success: false,
-        message: 'Redemption failed',
-        error: error.message
-      });
+    // Validation
+    if (!securityPin || !tokenAmount) {
+      throw new Error('Security PIN and amount are required');
     }
-  }
 
+    // Get admin ID from environment
+    const adminUserId = process.env.ADMIN_USER_ID;
+    if (!adminUserId) {
+      throw new Error('System configuration error');
+    }
+
+    const [fromUser, adminUser, wallet, token] = await Promise.all([
+      User.findById(fromUserId).select('+pin'),
+      User.findById(adminUserId),
+      Wallet.getOrCreateWallet(fromUserId),
+      Token.getToken()
+    ]);
+
+    if (!adminUser) {
+      throw new Error('System configuration error: Admin not found');
+    }
+
+    // Verify PIN
+    const isPinValid = await fromUser.comparePin(securityPin);
+    if (!isPinValid) {
+      throw new Error('Invalid security PIN');
+    }
+
+    // Check wallet balance
+    if (wallet.getBalance() < tokenAmount) {
+      throw new Error(`Insufficient tokens. Available: ${wallet.getBalance()}`);
+    }
+
+    // Verify minimum redemption
+    if (tokenAmount < token.redemptionRules.minRedemption) {
+      throw new Error(`Minimum redemption is ${token.redemptionRules.minRedemption} MTZ`);
+    }
+
+    // Calculate redemption value (mock fee)
+    const redemptionValue = tokenAmount * token.universalPrice.value;
+    const fee = redemptionValue * 0.05; // 5% fee
+    const netValue = redemptionValue - fee;
+
+    // Get wallets
+    const fromWallet = await Wallet.findOne({ user: fromUserId }).session(session);
+    const adminWallet = await Wallet.findOne({ user: adminUserId }).session(session) || 
+                       await Wallet.create([{ user: adminUserId }], { session }).then(wallets => wallets[0]);
+
+    if (!fromWallet.canSend(tokenAmount)) {
+      throw new Error('Insufficient balance');
+    }
+
+    // Transfer tokens (same as P2P)
+    await fromWallet.deductTokens(tokenAmount, session);
+    await adminWallet.addTokens(tokenAmount, session);
+
+    // Create transaction (similar to P2P but with cash redemption type)
+    const transactionData = {
+      type: 'cash_redemption',
+      fromUser: fromUserId,
+      toUser: adminUserId,
+      tokensAmount: tokenAmount,
+      cashAmount: netValue,
+      fees: {
+        amount: fee / token.universalPrice.value, // Convert back to tokens
+        rate: 0.05,
+        type: 'cash_redemption' // ← FIXED: Use 'cash_redemption' not 'redemption_fee'
+      },
+      status: 'completed',
+      notes: `Cash redemption: ${netValue} KSH`
+    };
+
+    const Transaction = mongoose.model('Transaction');
+    const transaction = new Transaction(transactionData);
+    const savedTx = await transaction.save({ session });
+
+    await session.commitTransaction();
+
+    res.json({
+      success: true,
+      message: `${netValue} KSH sent to your M-Pesa`,
+      data: {
+        receipt: {
+          transactionId: savedTx._id,
+          tokensRedeemed: tokenAmount,
+          redemptionValue: netValue,
+          fee: fee,
+          feeValue: fee,
+          newBalance: fromWallet.balances.MTZ - tokenAmount,
+          mpesaStatus: 'completed'
+        }
+      }
+    });
+
+  } catch (error) {
+    await session.abortTransaction();
+    res.status(400).json({
+      success: false,
+      message: 'Redemption failed',
+      error: error.message
+    });
+  } finally {
+    session.endSession();
+  }
+}
   /**
    * ADMIN: Transfer float to depot/user
    */

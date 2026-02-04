@@ -1,10 +1,10 @@
-// src/app.js
 import express from 'express';
 import cors from 'cors';
 import morgan from 'morgan';
 import Environment from './config/env.js';
 import connectDB from './config/db.js'; 
 import { notFound, errorHandler } from './middleware/errorHandler.js';
+import os from 'os';
 
 // Route Imports
 import authRoutes from './routes/authRoutes.js';
@@ -28,14 +28,12 @@ class App {
    * Configure application middleware
    */
   setupMiddleware() {
-    // Security & CORS
+    // Security & CORS - Allow all origins for testing
     this.app.use(cors({
-      origin: [
-        'http://localhost:3000',
-        'http://localhost:8081',
-        'exp://192.168.100.6:8081'
-      ],
-      credentials: true
+      origin: '*', // Allow all origins
+      credentials: true,
+      methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
+      allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With']
     }));
 
     // Request logging
@@ -118,26 +116,74 @@ class App {
   }
 
   /**
+   * Get local IP address
+   */
+  getLocalIP() {
+    const interfaces = os.networkInterfaces();
+    for (const name of Object.keys(interfaces)) {
+      for (const iface of interfaces[name]) {
+        // Skip internal and non-IPv4 addresses
+        if (iface.family === 'IPv4' && !iface.internal) {
+          // Prefer WiFi/Ethernet over other interfaces
+          if (name.toLowerCase().includes('wi-fi') || 
+              name.toLowerCase().includes('ethernet') ||
+              name.toLowerCase().includes('wlan')) {
+            return iface.address;
+          }
+        }
+      }
+    }
+    // Fallback to first found IP
+    for (const name of Object.keys(interfaces)) {
+      for (const iface of interfaces[name]) {
+        if (iface.family === 'IPv4' && !iface.internal) {
+          return iface.address;
+        }
+      }
+    }
+    return 'localhost';
+  }
+
+  /**
    * Start the server
    */
   async start() {
     try {
       await connectDB();
 
-      const PORT = Environment.get('PORT');
-      this.server = this.app.listen(PORT, () => {
+      const PORT = Environment.get('PORT') || 5000;
+      const HOST = '0.0.0.0'; // Listen on all network interfaces
+      const localIP = this.getLocalIP();
+      
+      this.server = this.app.listen(PORT, HOST, () => {
         console.log(`
-🥛 MilkBank API Server Started!
-📍 Port: ${PORT}
-🌍 Environment: ${Environment.get('NODE_ENV')}
-🗄️ Database: Connected ✅
+╔═══════════════════════════════════════════════════════╗
+║        🥛 MilkBank API Server Started!               ║
+╠═══════════════════════════════════════════════════════╣
+║ 📍 Local:      http://localhost:${PORT.toString().padEnd(4)}              ║
+║ 🌐 Network:    http://${localIP}:${PORT}            ║
+║ 🔌 Listening:  ${HOST}:${PORT}                      ║
+╠═══════════════════════════════════════════════════════╣
+║ 📱 Environment: ${Environment.get('NODE_ENV') || 'development'}      ║
+║ 🗄️ Database:   Connected ✅                         ║
+║ ⏰ Started:    ${new Date().toLocaleTimeString()}             ║
+╚═══════════════════════════════════════════════════════╝
 
+💡 For Expo Go on same WiFi:
+• Use: http://${localIP}:${PORT}
+• Make sure device is on same network
+• Disable VPN if active
+
+🛡️ Firewall Check:
+• Port ${PORT} must be open in Windows Firewall
+• Run as Administrator if connection fails
         `);
       });
 
       return this.server;
     } catch (error) {
-      console.error('Failed to start server:', error.message);
+      console.error('❌ Failed to start server:', error.message);
+      console.error('Error details:', error);
       process.exit(1);
     }
   }
@@ -148,7 +194,7 @@ class App {
   async stop() {
     if (this.server) {
       this.server.close();
-      console.log('Server stopped gracefully');
+      console.log('🛑 Server stopped gracefully');
     }
   }
 }

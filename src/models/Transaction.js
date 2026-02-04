@@ -1,11 +1,12 @@
 import mongoose from 'mongoose';
 
 const transactionSchema = new mongoose.Schema({
-  type: {
-    type: String,
-    enum: ['milk_deposit', 'cash_eposit', 'milk_withdrawal', 'kcc_pickup', 'kcc_delivery', 'token_transfer'],
-    required: true
-  },
+// In transactionSchema
+type: {
+  type: String,
+  enum: ['milk_deposit', 'cash_deposit', 'milk_withdrawal', 'kcc_pickup', 'kcc_delivery', 'token_transfer', 'cash_redemption'], // ADD cash_redemption
+  required: true
+},
   fromUser: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User'
@@ -57,11 +58,11 @@ const transactionSchema = new mongoose.Schema({
       type: Number,
       default: 0
     },
-    type: {
-      type: String,
-      enum: ['p2p_transfer', 'cash_redemption', 'withdrawal', 'none'],
-      default: 'none'
-    }
+type: {
+  type: String,
+  enum: ['p2p_transfer', 'cash_redemption', 'withdrawal', 'none'],
+  default: 'none'
+}
   },
   exchangeRate: Number,
   lactometerReading: Number,
@@ -123,7 +124,7 @@ transactionSchema.pre('save', async function(next) {
     this.fees.type = 'p2p_transfer';
   } else if (this.type === 'milk_withdrawal' && this.fees.amount > 0) {
     this.fees.type = 'withdrawal';
-  } else if (this.type === 'cash_eposit' && this.fees.amount > 0) {
+  } else if (this.type === 'cash_deposit' && this.fees.amount > 0) {
     this.fees.type = 'cash_redemption';
   } else {
     this.fees.type = 'none';
