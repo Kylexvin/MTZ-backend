@@ -54,6 +54,18 @@ router.get('/:depotId/deposit/pending',
   AuthMiddleware.requireAssignedDepot(), // ✅ ADD THIS
   DepotController.getPendingDeposits
 );
+router.get('/:depotId/transactions', 
+  AuthMiddleware.protect,
+  AuthMiddleware.authorize('attendant'), 
+  AuthMiddleware.requireAssignedDepot(),
+  DepotController.getDepotTransactions
+);
+router.get('/:depotId/today-stats', 
+  AuthMiddleware.protect,
+  AuthMiddleware.authorize('attendant'), 
+  AuthMiddleware.requireAssignedDepot(),
+  DepotController.getTodayStats
+);
 
 router.post('/:depotId/deposit/pay', 
   AuthMiddleware.protect,

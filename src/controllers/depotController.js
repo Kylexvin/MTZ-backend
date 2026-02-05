@@ -329,6 +329,39 @@ static async assignAttendant(req, res) {
       });
     }
   }
+// Helper functions for generating codes (inside class as static methods)
+/**
+ * Generate depot-specific sequential deposit code (KMB001-0025)
+ */
+static async generateDepositCode(depotCode) {
+  const Transaction = mongoose.model('Transaction');
+  
+  const lastDeposit = await Transaction.findOne(
+    { depot: { $exists: true }, depositCode: new RegExp(`^${depotCode}-`) },
+    { depositCode: 1 },
+    { sort: { createdAt: -1 } }
+  );
+  
+  let sequence = 1;
+  if (lastDeposit && lastDeposit.depositCode) {
+    const lastSequence = parseInt(lastDeposit.depositCode.split('-')[1]) || 0;
+    sequence = lastSequence + 1;
+  }
+  
+  return `${depotCode}-${sequence.toString().padStart(4, '0')}`;
+}
+
+/**
+ * Generate 6-digit easy-to-remember short code
+ */
+static generateShortCode() {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let result = '';
+  for (let i = 0; i < 6; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
 
 /**
  * Record milk deposit only (physical milk acceptance) - STEP 1
@@ -354,6 +387,14 @@ static async recordMilkDeposit(req, res) {
       return res.status(404).json({
         success: false,
         message: 'Farmer not found with this phone number'
+      });
+    }
+
+    // Check if farmer account is active
+    if (farmer.status !== 'active') {
+      return res.status(400).json({
+        success: false,
+        message: `Farmer account is ${farmer.status} - cannot accept deposits`
       });
     }
 
@@ -386,8 +427,9 @@ static async recordMilkDeposit(req, res) {
     }
 
     // ✅ GENERATE farmer-friendly codes
-    const depositCode = await this.generateDepositCode(depot.code);
-    const shortCode = this.generateShortCode();
+    // FIXED: Call using the class name
+    const depositCode = await DepotController.generateDepositCode(depot.code);
+    const shortCode = DepotController.generateShortCode();
 
     // Create PENDING milk deposit transaction (NO token amounts)
     const transaction = await Transaction.create({
@@ -448,42 +490,6 @@ static async recordMilkDeposit(req, res) {
   }
 }
 
-// ✅ HELPER FUNCTIONS - Added as static methods
-
-/**
- * Generate depot-specific sequential deposit code (KMB001-0025)
- */
-static async generateDepositCode(depotCode) {
-  const Transaction = mongoose.model('Transaction');
-  
-  // Find the last deposit for this depot to get next sequence
-  const lastDeposit = await Transaction.findOne(
-    { depot: { $exists: true }, depositCode: new RegExp(`^${depotCode}-`) },
-    { depositCode: 1 },
-    { sort: { createdAt: -1 } }
-  );
-  
-  let sequence = 1;
-  if (lastDeposit && lastDeposit.depositCode) {
-    const lastSequence = parseInt(lastDeposit.depositCode.split('-')[1]) || 0;
-    sequence = lastSequence + 1;
-  }
-  
-  return `${depotCode}-${sequence.toString().padStart(4, '0')}`;
-}
-
-/**
- * Generate 6-digit easy-to-remember short code
- */
-static generateShortCode() {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // No confusing characters (0,O,1,I)
-  let result = '';
-  for (let i = 0; i < 6; i++) {
-    result += chars.charAt(Math.floor(Math.random() * chars.length));
-  }
-  return result;
-}
-
 /**
  * Get pending deposits for specific depot
  */
@@ -511,12 +517,12 @@ static async getPendingDeposits(req, res) {
 
     // ✅ Calculate tokens due for each pending deposit
     const depositsWithTokens = pendingDeposits.map(deposit => {
-      const tokensDue = Token.calculateMintAmount(deposit.litersRaw, deposit.qualityGrade);
+      const tokensDue = deposit.litersRaw; // 1 liter = 1 MTZ
       return {
         transactionId: deposit._id,
         reference: deposit.reference,
-        depositCode: deposit.depositCode,  // ✅ Added
-        shortCode: deposit.shortCode,      // ✅ Added
+        depositCode: deposit.depositCode,
+        shortCode: deposit.shortCode,
         farmer: {
           name: deposit.fromUser.name,
           phone: deposit.fromUser.phone
@@ -547,9 +553,6 @@ static async getPendingDeposits(req, res) {
   }
 }
 
-/**
- * Process token payment for pending milk deposit - STEP 2
- */
 /**
  * Process token payment for pending milk deposit - SIMPLE SETTLEMENT
  */
@@ -652,6 +655,98 @@ static async processTokenPayment(req, res) {
   }
 }
 
+/**
+ * Get all transactions for specific depot with filters
+ */
+static async getDepotTransactions(req, res) {
+  try {
+    const depotId = req.params.depotId;
+    const attendantId = req.user.id;
+    const { 
+      type, 
+      status, 
+      startDate, 
+      endDate,
+      page = 1,
+      limit = 20 
+    } = req.query;
+
+    // Verify attendant is assigned to this depot
+    const attendant = await User.findById(attendantId);
+    if (!attendant.assignedDepot || attendant.assignedDepot.toString() !== depotId) {
+      return res.status(403).json({
+        success: false,
+        message: 'Attendant not authorized for this depot'
+      });
+    }
+
+    // Build filter
+    const filter = { depot: depotId };
+    if (type) filter.type = type; // 'milk_deposit', 'kcc_pickup', 'kcc_delivery'
+    if (status) filter.status = status; // 'pending', 'completed', 'failed'
+    
+    // Date filter
+    if (startDate || endDate) {
+      filter.createdAt = {};
+      if (startDate) filter.createdAt.$gte = new Date(startDate);
+      if (endDate) filter.createdAt.$lte = new Date(endDate);
+    }
+
+    const skip = (page - 1) * limit;
+
+    const [transactions, total] = await Promise.all([
+      Transaction.find(filter)
+        .populate('fromUser', 'name phone')
+        .populate('toUser', 'name phone')
+        .populate('kccAttendant', 'name phone')
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(parseInt(limit)),
+      Transaction.countDocuments(filter)
+    ]);
+
+    const formattedTransactions = transactions.map(tx => ({
+      id: tx._id,
+      reference: tx.reference,
+      type: tx.type,
+      status: tx.status,
+      fromUser: tx.fromUser,
+      toUser: tx.toUser,
+      kccAttendant: tx.kccAttendant,
+      litersRaw: tx.litersRaw,
+      litersPasteurized: tx.litersPasteurized,
+      tokensAmount: tx.tokensAmount,
+      qualityGrade: tx.qualityGrade,
+      lactometerReading: tx.lactometerReading,
+      depositCode: tx.depositCode,
+      shortCode: tx.shortCode,
+      notes: tx.notes,
+      createdAt: tx.createdAt,
+      updatedAt: tx.updatedAt
+    }));
+
+    res.json({
+      success: true,
+      message: 'Transactions retrieved',
+      data: {
+        transactions: formattedTransactions,
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total,
+          pages: Math.ceil(total / limit)
+        }
+      }
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve transactions',
+      error: error.message
+    });
+  }
+}
   /**
    * Get depot dashboard for specific depot
    */
@@ -878,67 +973,115 @@ static async processTokenPayment(req, res) {
     }
   }
 
+static async getDashboard(req, res) {
+  try {
+    // Use the depot from middleware instead of params
+    const depot = req.depot; // Already verified by requireAssignedDepot()
+    
+    // Count pending milk deposits for this depot
+    const pendingDeposits = await Transaction.countDocuments({
+      depot: depot._id,
+      type: 'milk_deposit',
+      status: 'pending'
+    });
 
-  /**
-   * Get depot dashboard
-   */
-  static async getDashboard(req, res) {
-    try {
-      const depot = await Depot.findById(req.params.depotId)
-        .populate('assignedAttendant', 'name phone tokenBalance');
+    // Check if KCC pickup is needed using depot method
+    const needsPickup = depot.needsKccPickup();
 
-      if (!depot) {
-        return res.status(404).json({
-          success: false,
-          message: 'Depot not found'
-        });
+    // Calculate utilization percentage
+    const totalStock = depot.stock.rawMilk + depot.stock.pasteurizedMilk;
+    const utilization = Math.round((totalStock / depot.stock.capacity) * 100);
+
+    const dashboard = {
+      stock: {
+        rawMilk: depot.stock.rawMilk,
+        pasteurizedMilk: depot.stock.pasteurizedMilk,
+        capacity: depot.stock.capacity,
+        utilization: utilization
+      },
+      operations: {
+        pendingDeposits: pendingDeposits,
+        needsPickup: needsPickup
+      },
+      depot: {
+        name: depot.name,
+        location: depot.location.county,
+        status: depot.status
       }
+    };
 
-      // Get today's transactions
-      const todayStart = new Date();
-      todayStart.setHours(0, 0, 0, 0);
+    res.json({
+      success: true,
+      data: dashboard
+    });
 
-      const todayTransactions = await Transaction.find({
-        depot: depot._id,
-        createdAt: { $gte: todayStart },
-        status: 'completed'
-      }).sort({ createdAt: -1 }).limit(10);
-
-      const dashboard = {
-        depot: {
-          name: depot.name,
-          code: depot.code,
-          location: depot.location,
-          status: depot.status
-        },
-        stock: {
-          rawMilk: depot.stock.rawMilk,
-          pasteurizedMilk: depot.stock.pasteurizedMilk,
-          capacity: depot.stock.capacity
-        },
-        todayActivity: {
-          deposits: todayTransactions.filter(tx => tx.type === 'milk_deposit').length,
-          withdrawals: todayTransactions.filter(tx => tx.type === 'milk_withdrawal').length,
-          pickups: todayTransactions.filter(tx => tx.type === 'kcc_pickup').length,
-          deliveries: todayTransactions.filter(tx => tx.type === 'kcc_delivery').length
-        },
-        recentTransactions: todayTransactions
-      };
-
-      res.json({
-        success: true,
-        message: 'Dashboard retrieved',
-        data: dashboard
-      });
-
-    } catch (error) {
-      res.status(500).json({
-        success: false,
-        message: 'Failed to load dashboard',
-        error: error.message
-      });
-    }
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Failed to load dashboard',
+      error: error.message
+    });
   }
+}
+
+/**
+ * Get today's summary stats for depot
+ */
+static async getTodayStats(req, res) {
+  try {
+    const depot = req.depot; // From requireAssignedDepot middleware
+    
+    // Get start of today
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    
+    // Get today's completed milk deposits
+    const todayDeposits = await Transaction.find({
+      depot: depot._id,
+      type: 'milk_deposit',
+      status: 'completed',
+      createdAt: { $gte: todayStart }
+    }).populate('fromUser', 'name phone');
+    
+    // Calculate stats
+    const milkReceived = todayDeposits.reduce((sum, tx) => sum + (tx.litersRaw || 0), 0);
+    
+    // Count unique farmers
+    const farmerIds = new Set(todayDeposits.map(tx => tx.fromUser?._id?.toString()).filter(Boolean));
+    const farmersCount = farmerIds.size;
+    
+    // Calculate tokens paid (assuming tokensAmount field)
+    const tokensPaid = todayDeposits.reduce((sum, tx) => sum + (tx.tokensAmount || 0), 0);
+    
+    // Calculate average lactometer reading
+    const lactometerReadings = todayDeposits.map(tx => tx.lactometerReading).filter(Boolean);
+    const avgLactometer = lactometerReadings.length > 0 
+      ? (lactometerReadings.reduce((a, b) => a + b, 0) / lactometerReadings.length).toFixed(1)
+      : 0;
+    
+    // Determine quality grade
+    const avgQuality = avgLactometer >= 28 ? 'Premium' : 
+                      avgLactometer >= 25 ? 'Standard' : 'Low';
+    
+    res.json({
+      success: true,
+      data: {
+        milkReceived,
+        farmersCount,
+        tokensPaid,
+        avgQuality: avgLactometer > 0 ? avgQuality : 'N/A'
+      }
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Failed to load today\'s stats',
+      error: error.message
+    });
+  }
+} 
+
 }
 
 export default DepotController;
