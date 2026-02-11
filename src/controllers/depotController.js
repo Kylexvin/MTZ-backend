@@ -1082,6 +1082,651 @@ static async getTodayStats(req, res) {
   }
 } 
 
+// Add these methods to your DepotController class
+
+/**
+ * 1. GET Current Stock Levels (Simplified for Inventory screen)
+ * Endpoint: GET /depots/:depotId/inventory
+ */
+static async getInventoryData(req, res) {
+  try {
+    const depot = req.depot; // From middleware
+    const attendantId = req.user.id;
+
+    // Calculate utilization percentage
+    const totalStock = depot.stock.rawMilk + depot.stock.pasteurizedMilk;
+    const utilization = Math.round((totalStock / depot.stock.capacity) * 100);
+
+    const inventoryData = {
+      stock: {
+        rawMilk: depot.stock.rawMilk,
+        pasteurizedMilk: depot.stock.pasteurizedMilk,
+        capacity: depot.stock.capacity,
+        utilization: utilization,
+        lastUpdated: depot.updatedAt
+      },
+      depot: {
+        name: depot.name,
+        code: depot.code,
+        location: depot.location
+      }
+    };
+
+    res.json({
+      success: true,
+      message: 'Inventory data retrieved',
+      data: inventoryData
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve inventory data',
+      error: error.message
+    });
+  }
+}
+
+/**
+ * 2. GET Recent KCC Operations
+ * Endpoint: GET /depots/:depotId/operations/recent?limit=5
+ */
+static async getRecentKccOperations(req, res) {
+  try {
+    const depot = req.depot;
+    const limit = parseInt(req.query.limit) || 5;
+    
+    const formattedRecentOps = recentOperations.map(op => {
+  const isPickup = op.type === 'kcc_pickup';
+  let displayTime = 'Recently';
+  
+  if (op.createdAt && op.createdAt instanceof Date) {
+    const date = new Date(op.createdAt);
+    const now = new Date();
+    
+    // Reset times to compare just dates
+    const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+    const transactionDate = new Date(date.getFullYear(), date.getMonth(), date.getDate());
+    
+    const timeString = date.toLocaleTimeString('en-US', { 
+      hour: '2-digit', 
+      minute: '2-digit',
+      hour12: true 
+    });
+    
+    if (transactionDate.getTime() === today.getTime()) {
+      displayTime = `Today, ${timeString}`;
+    } else {
+      const yesterday = new Date(today);
+      yesterday.setDate(yesterday.getDate() - 1);
+      
+      if (transactionDate.getTime() === yesterday.getTime()) {
+        displayTime = `Yesterday, ${timeString}`;
+      } else {
+        const diffDays = Math.floor((today - transactionDate) / (1000 * 60 * 60 * 24));
+        
+        if (diffDays < 7) {
+          const daysOfWeek = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+          const dayName = daysOfWeek[date.getDay()];
+          displayTime = `${dayName}, ${timeString}`;
+        } else {
+          displayTime = date.toLocaleDateString('en-US', { 
+            month: 'short',
+            day: 'numeric'
+          });
+        }
+      }
+    }
+  }
+  
+  return {
+    id: op._id?.toString() || `op_${Date.now()}`,
+    type: isPickup ? 'pickup' : 'delivery',
+    liters: isPickup ? (op.litersRaw || 0) : (op.litersPasteurized || 0),
+    time: displayTime,
+    status: op.status || 'completed'
+  };
+}); 
+
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve KCC operations',
+      error: error.message
+    });
+  }
+}
+
+/**
+ * 3. GET Pending KCC Operations (for scheduled/pending)
+ * Endpoint: GET /depots/:depotId/operations/pending
+ */
+static async getPendingKccOperations(req, res) {
+  try {
+    const depot = req.depot;
+    
+    // Check for pending delivery requests
+    const pendingDeliveries = await DeliveryRequest.find({
+      depot: depot._id,
+      status: 'pending',
+      expiresAt: { $gt: new Date() }
+    })
+    .populate('assignedKcc', 'name code')
+    .sort({ createdAt: -1 })
+    .lean();
+
+    // Format as pending operations
+    const pendingOperations = pendingDeliveries.map(delivery => ({
+      id: delivery._id,
+      type: 'delivery',
+      liters: delivery.litersRequested,
+      time: 'Scheduled',
+      status: 'pending',
+      kccBranch: delivery.assignedKcc ? {
+        name: delivery.assignedKcc.name,
+        code: delivery.assignedKcc.code
+      } : null,
+      qrCode: delivery.qrCode
+    }));
+
+    res.json({
+      success: true,
+      message: 'Pending KCC operations retrieved',
+      data: {
+        pendingOperations: pendingOperations
+      }
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve pending operations',
+      error: error.message
+    });
+  }
+}
+
+/**
+ * 4. GET Stock Alerts
+ * Endpoint: GET /depots/:depotId/alerts
+ */
+static async getStockAlerts(req, res) {
+  try {
+    const depot = req.depot;
+    const alerts = [];
+
+    // Check raw milk capacity
+    const rawMilkPercent = (depot.stock.rawMilk / depot.stock.capacity) * 100;
+    
+    if (rawMilkPercent >= 80) {
+      alerts.push({
+        id: 'capacity_warning',
+        type: 'capacity_warning',
+        severity: rawMilkPercent >= 90 ? 'high' : 'medium',
+        title: 'Raw Milk Nearing Capacity',
+        message: 'Consider scheduling KCC pickup soon',
+        threshold: 80,
+        current: Math.round(rawMilkPercent),
+        metric: 'rawMilk',
+        suggestedAction: 'Schedule KCC pickup',
+        createdAt: new Date()
+      });
+    }
+
+    // Check pasteurized milk stock (if too low)
+    const pasteurizedPercent = (depot.stock.pasteurizedMilk / depot.stock.capacity) * 100;
+    
+    if (pasteurizedPercent <= 10 && depot.stock.pasteurizedMilk > 0) {
+      alerts.push({
+        id: 'low_pasteurized',
+        type: 'low_stock',
+        severity: 'medium',
+        title: 'Low Pasteurized Milk Stock',
+        message: 'Consider requesting KCC delivery',
+        threshold: 10,
+        current: Math.round(pasteurizedPercent),
+        metric: 'pasteurizedMilk',
+        suggestedAction: 'Request KCC delivery',
+        createdAt: new Date()
+      });
+    }
+
+    // Check if KCC pickup is needed based on depot rules
+    if (depot.needsKccPickup()) {
+      alerts.push({
+        id: 'pickup_needed',
+        type: 'pickup_required',
+        severity: 'high',
+        title: 'KCC Pickup Required',
+        message: `Raw milk at ${Math.round(rawMilkPercent)}% capacity`,
+        threshold: depot.pickupRules.triggerValue || 80,
+        current: Math.round(rawMilkPercent),
+        metric: 'rawMilk',
+        suggestedAction: 'Request immediate pickup',
+        createdAt: new Date()
+      });
+    }
+
+    res.json({
+      success: true,
+      message: 'Stock alerts retrieved',
+      data: {
+        alerts: alerts,
+        hasAlerts: alerts.length > 0
+      }
+    });
+
+  } catch (error) {
+    res.status(500).json({
+      success: false,
+      message: 'Failed to retrieve stock alerts',
+      error: error.message
+    });
+  }
+}
+
+
+/**
+ * 5. Combined Endpoint for Inventory Screen - FIXED VERSION
+ * GET all data needed for the Inventory screen in one call
+ * Endpoint: GET /depots/:depotId/inventory-screen
+ */
+static async getInventoryScreenData(req, res) {
+  try {
+    const depot = req.depot;
+    
+    // Get all data in parallel with better error handling
+    const [
+      inventoryData,
+      recentOps,
+      pendingOps,
+      alerts
+    ] = await Promise.allSettled([
+      // 1. Stock data
+      (async () => {
+        const rawMilk = depot.stock?.rawMilk || 0;
+        const pasteurizedMilk = depot.stock?.pasteurizedMilk || 0;
+        const capacity = depot.stock?.capacity || 1;
+        const totalStock = rawMilk + pasteurizedMilk;
+        const utilization = Math.round((totalStock / capacity) * 100);
+        
+        return {
+          rawMilk,
+          pasteurizedMilk,
+          capacity,
+          utilization,
+          lastUpdated: depot.updatedAt
+        };
+      })(),
+      
+      // 2. Recent operations (last 3 completed)
+      Transaction.find({
+        depot: depot._id,
+        type: { $in: ['kcc_pickup', 'kcc_delivery'] },
+        status: 'completed'
+      })
+      .sort({ createdAt: -1 })
+      .limit(3)
+      .populate('kccAttendant', 'name phone')
+      .lean(),
+      
+      // 3. Pending operations (if DeliveryRequest model exists)
+      (async () => {
+        try {
+          const DeliveryRequest = mongoose.model('DeliveryRequest');
+          return await DeliveryRequest.find({
+            depot: depot._id,
+            status: 'pending',
+            expiresAt: { $gt: new Date() }
+          })
+          .populate('assignedKcc', 'name code')
+          .sort({ createdAt: -1 })
+          .lean();
+        } catch (error) {
+          console.log('DeliveryRequest model not available, returning empty array');
+          return [];
+        }
+      })(),
+      
+      // 4. Alerts
+      (async () => {
+        const alerts = [];
+        const rawMilk = depot.stock?.rawMilk || 0;
+        const capacity = depot.stock?.capacity || 1;
+        const rawMilkPercent = (rawMilk / capacity) * 100;
+        
+        if (rawMilkPercent >= 80) {
+          alerts.push({
+            id: 'capacity_warning',
+            type: 'capacity_warning',
+            severity: rawMilkPercent >= 90 ? 'high' : 'medium',
+            title: 'Raw Milk Nearing Capacity',
+            message: 'Consider scheduling KCC pickup soon',
+            current: Math.round(rawMilkPercent),
+            metric: 'rawMilk',
+            suggestedAction: 'Schedule KCC pickup',
+            createdAt: new Date()
+          });
+        }
+        
+        // Check pasteurized milk stock (if too low)
+        const pasteurizedMilk = depot.stock?.pasteurizedMilk || 0;
+        const pasteurizedPercent = (pasteurizedMilk / capacity) * 100;
+        
+        if (pasteurizedPercent <= 10 && pasteurizedMilk > 0) {
+          alerts.push({
+            id: 'low_pasteurized',
+            type: 'low_stock',
+            severity: 'medium',
+            title: 'Low Pasteurized Milk Stock',
+            message: 'Consider requesting KCC delivery',
+            current: Math.round(pasteurizedPercent),
+            metric: 'pasteurizedMilk',
+            suggestedAction: 'Request KCC delivery',
+            createdAt: new Date()
+          });
+        }
+        
+        return alerts;
+      })()
+    ]);
+
+    // Extract values from Promise.allSettled
+    const stockData = inventoryData.status === 'fulfilled' ? inventoryData.value : {};
+    const recentOperations = recentOps.status === 'fulfilled' ? recentOps.value : [];
+    const pendingOperations = pendingOps.status === 'fulfilled' ? pendingOps.value : [];
+    const stockAlerts = alerts.status === 'fulfilled' ? alerts.value : [];
+
+    // Format recent operations with safe date handling
+    const formattedRecentOps = recentOperations.map(op => {
+      const isPickup = op.type === 'kcc_pickup';
+      let displayTime = 'Recently';
+      
+      if (op.createdAt && op.createdAt instanceof Date) {
+        const time = new Date(op.createdAt);
+        const now = new Date();
+        const diffHours = (now - time) / (1000 * 60 * 60);
+        
+        if (diffHours < 24) {
+          displayTime = `Today, ${time.toLocaleTimeString('en-US', { 
+            hour: '2-digit', 
+            minute: '2-digit' 
+          })}`;
+        } else if (diffHours < 48) {
+          displayTime = `Yesterday, ${time.toLocaleTimeString('en-US', { 
+            hour: '2-digit', 
+            minute: '2-digit' 
+          })}`;
+        } else if (diffHours < 168) { // Within a week
+          const days = Math.floor(diffHours / 24);
+          displayTime = `${days} days ago`;
+        } else {
+          displayTime = time.toLocaleDateString('en-US', { 
+            month: 'short',
+            day: 'numeric'
+          });
+        }
+      }
+      
+      return {
+        id: op._id?.toString() || `op_${Date.now()}`,
+        type: isPickup ? 'pickup' : 'delivery',
+        liters: isPickup ? (op.litersRaw || 0) : (op.litersPasteurized || 0),
+        time: displayTime,
+        status: op.status || 'completed'
+      };
+    });
+
+    // Format pending operations
+    const formattedPendingOps = pendingOperations.map(delivery => ({
+      id: delivery._id?.toString() || `pending_${Date.now()}`,
+      type: 'pickup',
+      liters: delivery.litersRequested || 0,
+      time: 'Scheduled',
+      status: 'pending'
+    }));
+
+    // Combine all operations (recent + pending)
+    const allOperations = [...formattedRecentOps, ...formattedPendingOps];
+
+    const response = {
+      stockData,
+      kccOperations: allOperations,
+      stockAlerts,
+      depotInfo: {
+        name: depot.name || 'Unknown Depot',
+        code: depot.code || 'N/A',
+        location: depot.location || {}
+      }
+    };
+
+    res.json({
+      success: true,
+      message: 'Inventory screen data retrieved',
+      data: response
+    });
+
+  } catch (error) {
+    console.error('Error in getInventoryScreenData:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to load inventory screen data',
+      error: error.message,
+      // Provide helpful debug info
+      debug: {
+        depotId: req.depot?._id,
+        errorStack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      }
+    });
+  }
+}
+
+// Add these methods to your existing DepotController class
+
+/**
+ * Signal pickup availability (Depot attendant)
+ * POST /depots/:depotId/pickup-signal
+ */
+static async signalPickupAvailable(req, res) {
+  try {
+    const { estimatedLiters } = req.body;
+    const depot = req.depot; // From requireAssignedDepot middleware
+    
+    // Validate depot can create signal
+    const validation = depot.canCreatePickupSignal();
+    if (!validation.canCreate) {
+      return res.status(400).json({
+        success: false,
+        message: validation.reason
+      });
+    }
+    
+    // Use estimatedLiters or current stock
+    const litersToSignal = estimatedLiters || depot.stock.rawMilk;
+    
+    // Create pickup signal
+    await depot.createPickupSignal(litersToSignal);
+    
+    // Refresh depot data
+    const updatedDepot = await Depot.findById(depot._id);
+    
+    res.json({
+      success: true,
+      message: `Pickup signaled: ~${litersToSignal}L available`,
+      data: {
+        signal: {
+          estimatedLiters: updatedDepot.pickupSignal.estimatedLiters,
+          signaledAt: updatedDepot.pickupSignal.signaledAt,
+          expiresAt: updatedDepot.pickupSignal.expiresAt,
+          status: updatedDepot.pickupSignal.status,
+          timeRemaining: Math.round((updatedDepot.pickupSignal.expiresAt - new Date()) / 60000) + ' minutes'
+        },
+        depot: {
+          name: updatedDepot.name,
+          stock: {
+            rawMilk: updatedDepot.stock.rawMilk,
+            capacity: updatedDepot.stock.capacity
+          }
+        }
+      }
+    });
+    
+  } catch (error) {
+    console.error('Signal pickup error:', error);
+    res.status(400).json({
+      success: false,
+      message: 'Failed to signal pickup',
+      error: error.message
+    });
+  }
+}
+
+/**
+ * Cancel pickup signal (Depot attendant)
+ * DELETE /depots/:depotId/pickup-signal
+ */
+static async cancelPickupSignal(req, res) {
+  try {
+    const depot = req.depot;
+    
+    // Check if there's an active signal to cancel
+    if (!depot.pickupSignal || depot.pickupSignal.status !== 'available') {
+      return res.status(400).json({
+        success: false,
+        message: 'No active pickup signal to cancel'
+      });
+    }
+    
+    // Cancel the signal
+    await depot.cancelPickupSignal();
+    
+    res.json({
+      success: true,
+      message: 'Pickup signal cancelled',
+      data: {
+        cancelledAt: new Date(),
+        depot: {
+          name: depot.name,
+          code: depot.code
+        }
+      }
+    });
+    
+  } catch (error) {
+    console.error('Cancel pickup error:', error);
+    res.status(400).json({
+      success: false,
+      message: 'Failed to cancel pickup signal',
+      error: error.message
+    });
+  }
+}
+
+/**
+ * Get current pickup signal status (Depot attendant)
+ * GET /depots/:depotId/pickup-signal
+ */
+static async getPickupSignalStatus(req, res) {
+  try {
+    const depot = req.depot;
+    
+    // Get signal status (auto-expires if needed)
+    const signal = await depot.getPickupSignalStatus();
+    
+    if (!signal || !signal.status) {
+      return res.json({
+        success: true,
+        message: 'No active pickup signal',
+        data: { 
+          signal: null,
+          depotStock: depot.stock.rawMilk
+        }
+      });
+    }
+    
+    // Check if accepted by a KCC attendant
+    let acceptedBy = null;
+    if (signal.acceptedBy) {
+      const kccAttendant = await User.findById(signal.acceptedBy).select('name phone');
+      if (kccAttendant) {
+        acceptedBy = {
+          name: kccAttendant.name,
+          phone: kccAttendant.phone
+        };
+      }
+    }
+    
+    res.json({
+      success: true,
+      message: 'Pickup signal status retrieved',
+      data: {
+        signal: {
+          estimatedLiters: signal.estimatedLiters,
+          signaledAt: signal.signaledAt,
+          expiresAt: signal.expiresAt,
+          status: signal.status,
+          timeRemaining: signal.expiresAt ? 
+            Math.round((signal.expiresAt - new Date()) / 60000) + ' minutes' : null,
+          acceptedBy: acceptedBy
+        },
+        depot: {
+          name: depot.name,
+          stock: {
+            rawMilk: depot.stock.rawMilk,
+            capacity: depot.stock.capacity
+          }
+        }
+      }
+    });
+    
+  } catch (error) {
+    console.error('Get pickup signal error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get pickup signal status',
+      error: error.message
+    });
+  }
+}
+
+/**
+ * Clear pickup signal after KCC completes pickup (internal/auto)
+ * This should be called after KCC attendant records pickup via existing recordKccPickup
+ */
+static async clearPickupSignalAfterPickup(req, res) {
+  try {
+    const { depotId } = req.params;
+    
+    const depot = await Depot.findById(depotId);
+    if (!depot) {
+      return res.status(404).json({
+        success: false,
+        message: 'Depot not found'
+      });
+    }
+    
+    // Clear the signal
+    await depot.clearPickupSignal();
+    
+    res.json({
+      success: true,
+      message: 'Pickup signal cleared after collection',
+      data: {
+        clearedAt: new Date(),
+        depot: depot.name
+      }
+    });
+    
+  } catch (error) {
+    console.error('Clear pickup signal error:', error);
+    res.status(400).json({
+      success: false,
+      message: 'Failed to clear pickup signal',
+      error: error.message
+    });
+  }
+}
+
 }
 
 export default DepotController;

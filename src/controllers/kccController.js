@@ -787,7 +787,366 @@ static async getMyDeliveryRequests(req, res) {
     });
   }
 }
-   
+ // Add these methods to your existing KccController class
+
+/**
+ * Get available pickup signals for KCC attendants (County-based)
+ * GET /kcc/pickups/available
+ */
+static async getAvailablePickups(req, res) {
+  try {
+    const kccAttendantId = req.user.id;
+    
+    // Get KCC attendant and their branch
+    const kccAttendant = await User.findById(kccAttendantId).populate('assignedKcc');
+    if (!kccAttendant || !kccAttendant.assignedKcc) {
+      return res.status(400).json({
+        success: false,
+        message: 'Not assigned to a KCC branch'
+      });
+    }
+    
+    const kccBranch = kccAttendant.assignedKcc;
+    
+    // Find available pickups in the same county as KCC branch
+    const availablePickups = await Depot.findAvailablePickupsByCounty(kccBranch.location.county);
+    
+    // Format response
+    const formattedPickups = await Promise.all(
+      availablePickups.map(async (depot) => {
+        // Calculate distance/time estimate (placeholder - could integrate maps API)
+        const timeEstimate = '15-30 min'; // Placeholder
+        
+        return {
+          signalId: depot._id, // Using depot ID as signal ID
+          depot: {
+            id: depot._id,
+            name: depot.name,
+            code: depot.code,
+            location: depot.location,
+            attendant: depot.assignedAttendant ? {
+              name: depot.assignedAttendant.name,
+              phone: depot.assignedAttendant.phone
+            } : null
+          },
+          signal: {
+            estimatedLiters: depot.pickupSignal.estimatedLiters,
+            signaledAt: depot.pickupSignal.signaledAt,
+            expiresAt: depot.pickupSignal.expiresAt,
+            timeRemaining: Math.round((depot.pickupSignal.expiresAt - new Date()) / 60000) + ' minutes'
+          },
+          stock: {
+            rawMilk: depot.stock.rawMilk,
+            capacity: depot.stock.capacity,
+            utilization: Math.round((depot.stock.rawMilk / depot.stock.capacity) * 100)
+          },
+          logistics: {
+            estimatedTime: timeEstimate,
+            county: depot.location.county,
+            priority: depot.pickupSignal.estimatedLiters > 500 ? 'High' : 'Normal'
+          }
+        };
+      })
+    );
+    
+    res.json({
+      success: true,
+      message: `Found ${formattedPickups.length} available pickups in ${kccBranch.location.county}`,
+      data: {
+        myBranch: {
+          name: kccBranch.name,
+          county: kccBranch.location.county
+        },
+        availablePickups: formattedPickups
+      }
+    });
+    
+  } catch (error) {
+    console.error('Get available pickups error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get available pickups',
+      error: error.message
+    });
+  }
+}
+
+/**
+ * Accept a pickup signal (KCC attendant claims it)
+ * POST /kcc/pickup-signals/:signalId/accept
+ */
+static async acceptPickupSignal(req, res) {
+  try {
+    const { signalId } = req.params; // depotId
+    const kccAttendantId = req.user.id;
+    
+    // Get KCC attendant and verify
+    const kccAttendant = await User.findById(kccAttendantId).populate('assignedKcc');
+    if (!kccAttendant || kccAttendant.role !== 'kcc_attendant') {
+      return res.status(403).json({
+        success: false,
+        message: 'Only KCC attendants can accept pickups'
+      });
+    }
+    
+    const kccBranch = kccAttendant.assignedKcc;
+    if (!kccBranch) {
+      return res.status(400).json({
+        success: false,
+        message: 'KCC attendant not assigned to any branch'
+      });
+    }
+    
+    // Find depot with active signal
+    const depot = await Depot.findById(signalId);
+    if (!depot) {
+      return res.status(404).json({
+        success: false,
+        message: 'Depot not found'
+      });
+    }
+    
+    // Check if depot is in same county as KCC branch
+    if (depot.location.county !== kccBranch.location.county) {
+      return res.status(400).json({
+        success: false,
+        message: `This depot is in ${depot.location.county}, your branch serves ${kccBranch.location.county}`
+      });
+    }
+    
+    // Check signal status
+    await depot.getPickupSignalStatus(); // Auto-expire if needed
+    
+    if (!depot.pickupSignal || depot.pickupSignal.status !== 'available') {
+      return res.status(400).json({
+        success: false,
+        message: 'Pickup signal no longer available',
+        data: {
+          currentStatus: depot.pickupSignal?.status || 'no signal'
+        }
+      });
+    }
+    
+    // Check if KCC has any pending payments first
+    const pendingPickups = await Transaction.find({
+      kccAttendant: kccAttendantId,
+      type: 'kcc_pickup',
+      status: 'pending'
+    });
+    
+    if (pendingPickups.length > 0) {
+      const totalPendingLiters = pendingPickups.reduce((sum, tx) => sum + tx.litersRaw, 0);
+      return res.status(400).json({
+        success: false,
+        message: 'Please complete payment for existing pickups first',
+        data: {
+          pendingPickups: pendingPickups.length,
+          totalPendingLiters: totalPendingLiters,
+          totalCost: totalPendingLiters
+        }
+      });
+    }
+    
+    // ✅ FIX: Use ObjectId for comparison
+    const kccAttendantIdObj = new mongoose.Types.ObjectId(kccAttendantId);
+    
+    // Accept the pickup signal
+    depot.pickupSignal.status = 'accepted';
+    depot.pickupSignal.acceptedBy = kccAttendantIdObj;
+    await depot.save();
+    
+    // Get depot attendant info
+    const depotAttendant = await User.findById(depot.assignedAttendant).select('name phone');
+    
+    res.json({
+      success: true,
+      message: `Pickup accepted for ${depot.name}`,
+      data: {
+        acceptance: {
+          signalId: depot._id,
+          depot: {
+            name: depot.name,
+            code: depot.code,
+            location: depot.location,
+            attendant: depotAttendant
+          },
+          estimatedLiters: depot.pickupSignal.estimatedLiters,
+          acceptedAt: new Date(),
+          kccAttendant: {
+            name: kccAttendant.name,
+            phone: kccAttendant.phone
+          },
+          instructions: [
+            `Proceed to ${depot.name} within 2 hours`,
+            `Contact depot attendant: ${depotAttendant?.name || 'N/A'} (${depotAttendant?.phone || 'N/A'})`,
+            `Measure milk quantity physically upon arrival`,
+            `Use "Record Pickup" in app after measurement`
+          ]
+        }
+      }
+    });
+    
+  } catch (error) {
+    console.error('Accept pickup error:', error);
+    
+    res.status(400).json({
+      success: false,
+      message: 'Failed to accept pickup',
+      error: error.message
+    });
+  }
+}
+
+/**
+ * Get accepted pickup for current KCC attendant
+ * GET /kcc/pickups/accepted
+ */
+static async getAcceptedPickup(req, res) {
+  try {
+    const kccAttendantId = req.user.id;
+    
+    const depot = await Depot.findAcceptedPickupByKccAttendant(kccAttendantId);
+    
+    if (!depot) {
+      return res.json({
+        success: true,
+        message: 'No accepted pickup found',
+        data: { acceptedPickup: null }
+      });
+    }
+    
+    // Get depot attendant info
+    const depotAttendant = await User.findById(depot.assignedAttendant).select('name phone');
+    
+    res.json({
+      success: true,
+      message: `You have an accepted pickup at ${depot.name}`,
+      data: {
+        acceptedPickup: {
+          signalId: depot._id,
+          depot: {
+            name: depot.name,
+            code: depot.code,
+            location: depot.location,
+            attendant: depotAttendant
+          },
+          signal: depot.pickupSignal,
+          timeRemaining: Math.round((depot.pickupSignal.expiresAt - new Date()) / 60000) + ' minutes'
+        }
+      }
+    });
+    
+  } catch (error) {
+    console.error('Get accepted pickup error:', error);
+    res.status(500).json({
+      success: false,
+      message: 'Failed to get accepted pickup',
+      error: error.message
+    });
+  }
+}
+
+/**
+ * Complete pickup signal after collection (optional - can be auto-cleared)
+ * POST /kcc/pickup-signals/:signalId/complete
+ */
+static async completePickupSignal(req, res) {
+  try {
+    const { signalId } = req.params;
+    const kccAttendantId = req.user.id;
+    
+    const depot = await Depot.findById(signalId);
+    if (!depot) {
+      return res.status(404).json({
+        success: false,
+        message: 'Depot not found'
+      });
+    }
+    
+    // Verify this KCC attendant accepted this signal
+    if (!depot.pickupSignal || 
+        depot.pickupSignal.status !== 'accepted' || 
+        depot.pickupSignal.acceptedBy.toString() !== kccAttendantId) {
+      return res.status(403).json({
+        success: false,
+        message: 'You have not accepted this pickup signal'
+      });
+    }
+    
+    // Complete the signal
+    await depot.completePickupSignal();
+    
+    res.json({
+      success: true,
+      message: 'Pickup signal marked as completed',
+      data: {
+        completedAt: new Date(),
+        depot: depot.name,
+        signalId: depot._id
+      }
+    });
+    
+  } catch (error) {
+    console.error('Complete pickup error:', error);
+    res.status(400).json({
+      success: false,
+      message: 'Failed to complete pickup signal',
+      error: error.message
+    });
+  }
+}
+
+/**
+ * Release pickup signal if KCC attendant cannot fulfill (cancel acceptance)
+ * DELETE /kcc/pickup-signals/:signalId/release
+ */
+static async releasePickupSignal(req, res) {
+  try {
+    const { signalId } = req.params;
+    const kccAttendantId = req.user.id;
+    
+    const depot = await Depot.findById(signalId);
+    if (!depot) {
+      return res.status(404).json({
+        success: false,
+        message: 'Depot not found'
+      });
+    }
+    
+    // Verify this KCC attendant accepted this signal
+    if (!depot.pickupSignal || 
+        depot.pickupSignal.status !== 'accepted' || 
+        depot.pickupSignal.acceptedBy.toString() !== kccAttendantId) {
+      return res.status(403).json({
+        success: false,
+        message: 'You have not accepted this pickup signal'
+      });
+    }
+    
+    // Release the signal (set back to available)
+    depot.pickupSignal.status = 'available';
+    depot.pickupSignal.acceptedBy = null;
+    await depot.save();
+    
+    res.json({
+      success: true,
+      message: 'Pickup signal released',
+      data: {
+        releasedAt: new Date(),
+        depot: depot.name,
+        note: 'This pickup is now available for other KCC attendants'
+      }
+    });
+    
+  } catch (error) {
+    console.error('Release pickup error:', error);
+    res.status(400).json({
+      success: false,
+      message: 'Failed to release pickup signal',
+      error: error.message
+    });
+  }
+}  
   /**
    * Get KCC branch details and attendants
    */

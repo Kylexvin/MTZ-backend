@@ -36,6 +36,34 @@ const depotSchema = new mongoose.Schema({
       required: true
     }
   },
+  
+  // ✅ NEW: Pickup Signal System
+  pickupSignal: {
+    estimatedLiters: {
+      type: Number,
+      min: 1,
+      default: null
+    },
+    signaledAt: {
+      type: Date,
+      default: null
+    },
+    acceptedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User',
+      default: null
+    },
+    status: {
+      type: String,
+      enum: ['available', 'accepted', 'completed', 'cancelled', 'expired', null],
+      default: null
+    },
+    expiresAt: {
+      type: Date,
+      default: null
+    }
+  },
+  
   pricing: {
     baseRate: {
       type: Number,
@@ -113,10 +141,128 @@ const depotSchema = new mongoose.Schema({
   timestamps: true
 });
 
+// Indexes
 depotSchema.index({ 'location.county': 1 });
 depotSchema.index({ status: 1 });
 depotSchema.index({ assignedAttendant: 1 });
+depotSchema.index({ 'pickupSignal.status': 1 }); // ✅ NEW: For quick pickup signal queries
+depotSchema.index({ 'pickupSignal.expiresAt': 1 }); // ✅ NEW: For expiry cleanup
 
+// ✅ NEW: Method to create pickup signal
+depotSchema.methods.createPickupSignal = function(estimatedLiters) {
+  this.pickupSignal = {
+    estimatedLiters: estimatedLiters || this.stock.rawMilk,
+    signaledAt: new Date(),
+    status: 'available',
+    expiresAt: new Date(Date.now() + 2 * 60 * 60 * 1000) // 2 hours
+  };
+  return this.save();
+};
+
+// ✅ NEW: Method to cancel pickup signal
+depotSchema.methods.cancelPickupSignal = function() {
+  if (this.pickupSignal && this.pickupSignal.status === 'available') {
+    this.pickupSignal.status = 'cancelled';
+    return this.save();
+  }
+  return Promise.resolve(this);
+};
+
+// ✅ NEW: Method to accept pickup signal (for KCC attendant)
+depotSchema.methods.acceptPickupSignal = function(kccAttendantId) {
+  if (this.pickupSignal && this.pickupSignal.status === 'available') {
+    this.pickupSignal.status = 'accepted';
+    this.pickupSignal.acceptedBy = kccAttendantId;
+    return this.save();
+  }
+  throw new Error('Pickup signal not available or already taken');
+};
+
+// ✅ NEW: Method to complete pickup signal
+depotSchema.methods.completePickupSignal = function() {
+  if (this.pickupSignal && this.pickupSignal.status === 'accepted') {
+    this.pickupSignal.status = 'completed';
+    return this.save();
+  }
+  throw new Error('No accepted pickup signal to complete');
+};
+
+// ✅ NEW: Method to check if pickup signal is expired
+depotSchema.methods.isPickupSignalExpired = function() {
+  if (!this.pickupSignal || !this.pickupSignal.expiresAt) return false;
+  return new Date() > this.pickupSignal.expiresAt;
+};
+
+// ✅ NEW: Method to auto-expire pickup signal if needed
+depotSchema.methods.checkAndExpirePickupSignal = async function() {
+  if (this.pickupSignal && this.isPickupSignalExpired() && this.pickupSignal.status === 'available') {
+    this.pickupSignal.status = 'expired';
+    await this.save();
+  }
+  return this.pickupSignal;
+};
+
+// ✅ NEW: Method to get pickup signal status with auto-expiry check
+depotSchema.methods.getPickupSignalStatus = async function() {
+  await this.checkAndExpirePickupSignal();
+  return this.pickupSignal;
+};
+
+// ✅ NEW: Method to clear pickup signal (after pickup is recorded via existing flow)
+depotSchema.methods.clearPickupSignal = function() {
+  this.pickupSignal = {
+    estimatedLiters: null,
+    signaledAt: null,
+    acceptedBy: null,
+    status: null,
+    expiresAt: null
+  };
+  return this.save();
+};
+
+// ✅ NEW: Static method to find depots with available pickup signals by county (MVP: County-based)
+depotSchema.statics.findAvailablePickupsByCounty = function(county) {
+  return this.find({
+    'location.county': county,
+    'pickupSignal.status': 'available',
+    'pickupSignal.expiresAt': { $gt: new Date() },
+    status: 'active'
+  }).populate('assignedAttendant', 'name phone');
+};
+
+// ✅ NEW: Static method to find accepted pickup by KCC attendant
+depotSchema.statics.findAcceptedPickupByKccAttendant = function(kccAttendantId) {
+  return this.findOne({
+    'pickupSignal.status': 'accepted',
+    'pickupSignal.acceptedBy': kccAttendantId
+  });
+};
+
+// ✅ NEW: Static method to cleanup expired pickup signals (run as cron job)
+depotSchema.statics.cleanupExpiredPickupSignals = async function() {
+  const result = await this.updateMany(
+    {
+      'pickupSignal.status': 'available',
+      'pickupSignal.expiresAt': { $lt: new Date() }
+    },
+    {
+      $set: { 'pickupSignal.status': 'expired' }
+    }
+  );
+  return result.modifiedCount;
+};
+
+// ✅ NEW: Method to validate if depot can create pickup signal
+depotSchema.methods.canCreatePickupSignal = function() {
+  if (this.status !== 'active') return { canCreate: false, reason: 'Depot is not active' };
+  if (this.stock.rawMilk < 1) return { canCreate: false, reason: 'No raw milk available' };
+  if (this.pickupSignal && this.pickupSignal.status === 'available') {
+    return { canCreate: false, reason: 'Pickup already signaled' };
+  }
+  return { canCreate: true };
+};
+
+// Existing methods (unchanged)
 depotSchema.methods.canAcceptDeposit = function(liters) {
   if (this.status !== 'active') return false;
   if (this.stock.rawMilk + liters > this.stock.capacity) return false;

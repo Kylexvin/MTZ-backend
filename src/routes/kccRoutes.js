@@ -70,9 +70,49 @@ router.post('/pickup/pay',  // STEP 2: Process payment
   KccController.processKccPayment
 );
 
+// ========================
+// 🆕 NEW: PICKUP SIGNAL SYSTEM (KCC Attendant)
+// ========================
 
+// Get available pickup signals in KCC attendant's county
+router.get('/pickups/available',
+  AuthMiddleware.protect,
+  AuthMiddleware.authorize('kcc_attendant'),
+  AuthMiddleware.requireAssignedKcc(),
+  KccController.getAvailablePickups
+);
 
-// In kccRoutes.js - ADD THIS:
+// Accept a pickup signal (claim it)
+router.post('/pickup-signals/:signalId/accept',
+  AuthMiddleware.protect,
+  AuthMiddleware.authorize('kcc_attendant'),
+  AuthMiddleware.requireAssignedKcc(),
+  KccController.acceptPickupSignal
+);
+
+// Get currently accepted pickup
+router.get('/pickups/accepted',
+  AuthMiddleware.protect,
+  AuthMiddleware.authorize('kcc_attendant'),
+  AuthMiddleware.requireAssignedKcc(),
+  KccController.getAcceptedPickup
+);
+
+// Complete pickup signal after collection
+router.post('/pickup-signals/:signalId/complete',
+  AuthMiddleware.protect,
+  AuthMiddleware.authorize('kcc_attendant'),
+  AuthMiddleware.requireAssignedKcc(),
+  KccController.completePickupSignal
+);
+
+// Release pickup signal (if can't fulfill)
+router.delete('/pickup-signals/:signalId/release',
+  AuthMiddleware.protect,
+  AuthMiddleware.authorize('kcc_attendant'),
+  AuthMiddleware.requireAssignedKcc(),
+  KccController.releasePickupSignal
+);
 
 // ========================
 // 🏪 DEPOT ATTENDANT ROUTES 
@@ -94,10 +134,10 @@ router.post('/delivery/request',
 );
 
 // ========================
-// 🚚 KCC ATTENDANT ROUTES
+// 🚚 KCC ATTENDANT DELIVERY ROUTES
 // ========================
 
-// KCC attendants see requests for THEIR branch only
+// KCC attendants see delivery requests for THEIR branch only
 router.get('/delivery/requests',
   AuthMiddleware.protect,
   AuthMiddleware.authorize('kcc_attendant'),
@@ -112,9 +152,5 @@ router.post('/delivery/confirm',
   AuthMiddleware.requireAssignedKcc(),
   KccController.confirmKccDelivery
 );
-
-
-
-
 
 export default router;
