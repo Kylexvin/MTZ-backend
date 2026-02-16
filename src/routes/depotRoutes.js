@@ -192,4 +192,4 @@ router.get('/:depotId/inventory-screen',
   DepotController.getInventoryScreenData
 );
 
-export default router;
+export default router; 
